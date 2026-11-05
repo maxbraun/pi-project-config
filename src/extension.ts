@@ -15,6 +15,7 @@ export default async function (pi: ExtensionAPI) {
     if (typeof child.default !== 'function') throw new Error(`${module.path} must export a default extension function`);
     await child.default(pi);
   }
+  pi.on('resources_discover', () => ({ skillPaths: config.skillPaths }));
   pi.on('session_start', (_event, ctx) => {
     if (ctx.mode !== 'tui') return;
     if (config.layout === 'compact') {

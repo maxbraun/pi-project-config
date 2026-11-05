@@ -22,11 +22,12 @@ test('directory names are boundary matched', () => {
   assert.equal(isWithin('/work/foo', '/work/foobar'), false);
   assert.equal(isWithin('/work/foo', '/work/foo/src'), true);
 });
-test('nearest config wins and repository boundary prevents parent leakage', t => {
+test('all ancestor configs are discovered across repository boundaries', t => {
   const f = fixture(t);
   f.write('.pi/project.json', { layout: 'compact' });
   f.write('repo/.git', 'gitdir: elsewhere');
-  assert.equal(findProject(join(f.root, 'repo/src')), undefined);
+  assert.equal(findProject(join(f.root, 'repo/src')), join(f.root, '.pi/project.json'));
+  assert.equal(loadConfig(join(f.root, 'repo/src'), f.global).layout, 'compact');
   f.write('repo/.pi/project.json', { layout: 'default' });
   assert.equal(findProject(join(f.root, 'repo/src')), join(f.root, 'repo/.pi/project.json'));
 });
@@ -50,4 +51,72 @@ test('malformed JSON includes source filename', t => {
   f.write('project/.pi/project.json', {});
   writeFileSync(join(f.root, 'project/.pi/project.json'), '{');
   assert.throws(() => loadConfig(join(f.root, 'project'), f.global), /project.json/);
+});
+
+test('hierarchy merges outer to inner, excludes inherited names, and resolves local skills per file', t => {
+  const f = fixture(t);
+  f.write('agent/project-config.json', {
+    extensions: { base: './base.ts', extra: './extra.ts' },
+    skills: { shared: './shared', omit: './omit' },
+    defaults: { extensions: ['base'], skills: ['shared', 'omit'] },
+  });
+  f.write('.pi/project.json', { layout: 'compact', extensions: ['extra'], skillPaths: ['./skills'] });
+  f.write('repo/.git', 'gitdir: elsewhere');
+  f.write('repo/.pi/project.json', { skills: ['shared'], skillPaths: ['./skills'], exclude: { extensions: ['base'], skills: ['omit'] } });
+  f.write('repo/src/.pi/project.json', { layout: 'default', extensions: [] });
+  const c = loadConfig(join(f.root, 'repo/src'), f.global);
+  assert.equal(c.projectPaths.length, 3);
+  assert.equal(c.layout, 'default');
+  assert.deepEqual(c.extensions, ['extra']);
+  assert.deepEqual(c.skills, ['shared']);
+  assert.deepEqual(c.skillPaths, [join(f.root, 'agent/shared'), join(f.root, '.pi/skills'), join(f.root, 'repo/.pi/skills')]);
+});
+test('deeper config can re-enable names, and exclusion wins within a layer', t => {
+  const f = fixture(t);
+  f.write('agent/project-config.json', { extensions: { a: './a.ts' }, defaults: { extensions: ['a'], exclude: { extensions: ['a'] } } });
+  assert.deepEqual(loadConfig(f.root, f.global).extensions, []);
+  f.write('.pi/project.json', { extensions: ['a'] });
+  assert.deepEqual(loadConfig(f.root, f.global).extensions, ['a']);
+});
+test('invalid skills, exclusions and ancestor configs fail with diagnostics', t => {
+  const f = fixture(t);
+  for (const [value, pattern] of [
+    [{ skills: ['unknown'] }, /Unknown skill/],
+    [{ skills: 'bad' }, /skills must be an array/],
+    [{ skillPaths: [''] }, /skillPaths must be an array/],
+    [{ exclude: [] }, /exclude must be an object/],
+    [{ exclude: { skills: 'bad' } }, /exclude.skills must be an array/],
+    [{ exclude: { typo: [] } }, /unknown key/],
+    [{ typo: true }, /unknown key/],
+  ]) {
+    f.write('.pi/project.json', value);
+    assert.throws(() => loadConfig(join(f.root, 'repo/src'), f.global), pattern);
+  }
+});
+
+test('extension initializes duplicate modules once and provides skills through native discovery', async t => {
+  const f = fixture(t);
+  const previousDir = process.cwd();
+  const previousAgent = process.env.PI_CODING_AGENT_DIR;
+  t.after(() => {
+    process.chdir(previousDir);
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgent;
+  });
+  f.write('agent/project-config.json', {
+    extensions: { one: './child.mjs', alias: './child.mjs' },
+    skills: { shared: './skills' },
+    defaults: { extensions: ['one', 'alias'], skills: ['shared'] },
+  });
+  writeFileSync(join(f.root, 'agent/child.mjs'), 'export default function(pi) { pi.childLoads++; }');
+  process.chdir(f.root);
+  process.env.PI_CODING_AGENT_DIR = join(f.root, 'agent');
+  const handlers = new Map();
+  const pi = { childLoads: 0, on: (name, fn) => handlers.set(name, fn), registerCommand() {} };
+  const { default: extension } = await import('../src/extension.ts');
+  await extension(pi);
+  assert.equal(pi.childLoads, 1);
+  for (const reason of ['startup', 'reload']) {
+    assert.deepEqual(handlers.get('resources_discover')({ reason, cwd: f.root }), { skillPaths: [join(f.root, 'agent/skills')] });
+  }
 });

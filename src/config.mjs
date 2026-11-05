@@ -33,7 +33,7 @@ export function findProjects(cwd) {
   const paths = [];
   let dir = resolve(cwd);
   while (true) {
-    const path = join(dir, '.pi', 'project.json');
+    const path = join(dir, '.pi', 'settings.json');
     if (existsSync(path)) paths.unshift(path);
     const parent = dirname(dir);
     if (parent === dir) return paths;
@@ -42,9 +42,13 @@ export function findProjects(cwd) {
 }
 export function findProject(cwd) { return findProjects(cwd).at(-1); }
 export function loadConfig(cwd, globalPath) {
-  const global = existsSync(globalPath) ? read(globalPath) : {};
-  object(global, globalPath);
-  for (const key of Object.keys(global)) if (!['defaults', 'rules', 'extensions', 'layouts', 'skills'].includes(key)) throw new Error(`${globalPath}: unknown key ${key}`);
+  const settings = existsSync(globalPath) ? read(globalPath) : {};
+  object(settings, globalPath);
+  const global = Object.hasOwn(settings, 'projectConfig') ? settings.projectConfig : {};
+  object(global, `${globalPath}.projectConfig`);
+  if (global.enabled !== undefined && typeof global.enabled !== 'boolean') throw new Error('projectConfig.enabled must be a boolean');
+  if (global.enabled === false) return { enabled: false, layout: 'default', extensions: [], modules: [], skills: [], skillPaths: [], projectPaths: [], globalPath };
+  for (const key of Object.keys(global)) if (!['enabled', 'defaults', 'rules', 'extensions', 'layouts', 'skills'].includes(key)) throw new Error(`${globalPath}: unknown key ${key}`);
   const registry = global.extensions ?? {};
   const skills = global.skills ?? {};
   object(skills, 'skills');
@@ -75,9 +79,22 @@ export function loadConfig(cwd, globalPath) {
     selection(settings, 'rule');
     if (isWithin(resolve(dirname(globalPath), path), resolve(cwd))) merge(settings, 'rule');
   }
-  const projectPaths = findProjects(cwd);
+  const projectPaths = [];
+  for (const path of findProjects(cwd)) {
+    if (resolve(path) === resolve(globalPath)) continue;
+    const settings = read(path);
+    object(settings, path);
+    if (!Object.hasOwn(settings, 'projectConfig')) continue;
+    const local = settings.projectConfig;
+    object(local, `${path}.projectConfig`);
+    const { enabled, ...values } = local;
+    if (enabled !== undefined && typeof enabled !== 'boolean') throw new Error(`${path}: projectConfig.enabled must be a boolean`);
+    // Folder opt-outs skip that layer; they cannot override the global kill switch.
+    if (enabled === false) continue;
+    merge(values, `${path}.projectConfig`, dirname(path));
+    projectPaths.push(path);
+  }
   const projectPath = projectPaths.at(-1);
-  for (const path of projectPaths) merge(read(path), path, dirname(path));
   for (const name of names) if (!Object.hasOwn(registry, name)) throw new Error(`Unknown extension: ${name}`);
   if (!['default', 'compact'].includes(layout) && !Object.hasOwn(layouts, layout)) throw new Error(`Unknown layout: ${layout}`);
   for (const name of skillNames) if (!Object.hasOwn(skills, name)) throw new Error(`Unknown skill: ${name}`);
@@ -85,5 +102,5 @@ export function loadConfig(cwd, globalPath) {
   const skillPaths = [...new Set([...skillNames].map(name => resolve(base, skills[name])).concat([...localSkills]))];
   const modules = [...names].map(name => ({ name, path: resolve(base, registry[name]) }));
   if (Object.hasOwn(layouts, layout)) modules.push({ name: `layout:${layout}`, path: resolve(base, layouts[layout]) });
-  return { layout, extensions: [...names], modules, skills: [...skillNames], skillPaths, projectPath, projectPaths, globalPath };
+  return { enabled: true, layout, extensions: [...names], modules, skills: [...skillNames], skillPaths, projectPath, projectPaths, globalPath };
 }

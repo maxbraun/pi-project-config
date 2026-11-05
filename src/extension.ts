@@ -6,7 +6,7 @@ import { loadConfig } from './config.mjs';
 
 export default async function (pi: ExtensionAPI) {
   const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent');
-  const config = loadConfig(process.cwd(), join(agentDir, 'project-config.json'));
+  const config = loadConfig(process.cwd(), join(agentDir, 'settings.json'));
   const seen = new Set<string>();
   for (const module of config.modules) {
     if (seen.has(module.path)) continue;
